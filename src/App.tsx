@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   EMOTIONS,
+  ENTRIES_STORAGE_KEY,
   type EmotionId,
   type Entry,
   formatDay,
@@ -15,8 +16,10 @@ import {
   applyTheme,
   currentTimeHm,
   loadSettings,
+  REMINDER_CLAIM_KEY,
   saveSettings,
-  todayKey,
+  SETTINGS_STORAGE_KEY,
+  tryClaimReminderToday,
   type AppSettings,
   type Theme,
 } from './settings'
@@ -104,22 +107,67 @@ function MoonIcon() {
 }
 
 export default function App() {
+  const initialEntries = useRef(loadEntries())
   const [view, setView] = useState<View>('home')
-  const [entries, setEntries] = useState<Entry[]>(() => loadEntries())
+  const [entries, setEntries] = useState<Entry[]>(() => initialEntries.current.entries)
+  const [canPersistEntries, setCanPersistEntries] = useState(
+    () => initialEntries.current.status === 'ok',
+  )
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings())
   const [selected, setSelected] = useState<EmotionId | null>(null)
   const [intensity, setIntensity] = useState(5)
   const [note, setNote] = useState('')
   const [toast, setToast] = useState('')
+  const skipEntriesPersist = useRef(false)
+  const skipSettingsPersist = useRef(false)
+
+  useEffect(() => {
+    if (initialEntries.current.status === 'corrupt') {
+      setToast('Журнал повреждён и не перезаписан. Новые записи снова начнут сохраняться.')
+    }
+  }, [])
 
   useEffect(() => {
     applyTheme(settings.theme)
+    if (skipSettingsPersist.current) {
+      skipSettingsPersist.current = false
+      return
+    }
     saveSettings(settings)
   }, [settings])
 
   useEffect(() => {
+    if (!canPersistEntries) return
+    if (skipEntriesPersist.current) {
+      skipEntriesPersist.current = false
+      return
+    }
     saveEntries(entries)
-  }, [entries])
+  }, [entries, canPersistEntries])
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === ENTRIES_STORAGE_KEY) {
+        const result = loadEntries()
+        if (result.status === 'ok') {
+          skipEntriesPersist.current = true
+          setCanPersistEntries(true)
+          setEntries(result.entries)
+        }
+        return
+      }
+
+      if (event.key === SETTINGS_STORAGE_KEY || event.key === REMINDER_CLAIM_KEY) {
+        skipSettingsPersist.current = true
+        const next = loadSettings()
+        applyTheme(next.theme)
+        setSettings(next)
+      }
+    }
+
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
 
   useEffect(() => {
     if (!toast) return
@@ -133,14 +181,19 @@ export default function App() {
     const tick = () => {
       if (!('Notification' in window) || Notification.permission !== 'granted') return
       if (currentTimeHm() !== settings.reminderTime) return
-      if (settings.lastReminderDate === todayKey()) return
+      if (!tryClaimReminderToday()) {
+        skipSettingsPersist.current = true
+        setSettings(loadSettings())
+        return
+      }
 
       new Notification('Nuança', {
         body: 'Мягкий момент для себя: какой у тебя оттенок сейчас?',
         tag: 'nuanca-daily',
       })
 
-      setSettings((prev) => ({ ...prev, lastReminderDate: todayKey() }))
+      skipSettingsPersist.current = true
+      setSettings(loadSettings())
     }
 
     tick()
@@ -210,6 +263,7 @@ export default function App() {
       note: note.trim(),
       createdAt: new Date().toISOString(),
     }
+    setCanPersistEntries(true)
     setEntries((prev) => [entry, ...prev])
     resetForm()
     setToast('Сохранено. Твоя эмоция теперь часть ландшафта.')
@@ -217,6 +271,7 @@ export default function App() {
   }
 
   function removeEntry(id: string) {
+    if (!canPersistEntries) return
     setEntries((prev) => prev.filter((e) => e.id !== id))
   }
 
@@ -235,7 +290,11 @@ export default function App() {
       return
     }
 
+    // Оптимистично отмечаем чекбокс, пока ждём разрешение браузера.
+    setSettings((prev) => ({ ...prev, reminderEnabled: true }))
+
     if (!('Notification' in window)) {
+      setSettings((prev) => ({ ...prev, reminderEnabled: false }))
       setToast('Этот браузер не поддерживает уведомления.')
       return
     }
@@ -246,12 +305,11 @@ export default function App() {
     }
 
     if (permission !== 'granted') {
-      setToast('Разреши уведомления в настройках браузера.')
       setSettings((prev) => ({ ...prev, reminderEnabled: false }))
+      setToast('Разреши уведомления в настройках браузера.')
       return
     }
 
-    setSettings((prev) => ({ ...prev, reminderEnabled: true }))
     setToast(`Напомню в ${settings.reminderTime} — если вкладка открыта.`)
   }
 

@@ -26,6 +26,10 @@ export interface Entry {
   createdAt: string
 }
 
+export type EntriesLoadResult =
+  | { status: 'ok'; entries: Entry[] }
+  | { status: 'corrupt'; entries: Entry[] }
+
 export const EMOTIONS: Emotion[] = [
   {
     id: 'joy',
@@ -99,25 +103,52 @@ export const EMOTIONS: Emotion[] = [
   },
 ]
 
+const EMOTION_IDS = new Set<string>(EMOTIONS.map((e) => e.id))
+
+export const ENTRIES_STORAGE_KEY = 'nuanca-entries'
+
 export function getEmotion(id: EmotionId): Emotion {
   return EMOTIONS.find((e) => e.id === id) ?? EMOTIONS[0]
 }
 
-const STORAGE_KEY = 'nuanca-entries'
+function isEntry(value: unknown): value is Entry {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<Entry>
+  return (
+    typeof item.id === 'string' &&
+    typeof item.emotionId === 'string' &&
+    EMOTION_IDS.has(item.emotionId) &&
+    typeof item.intensity === 'number' &&
+    item.intensity >= 1 &&
+    item.intensity <= 10 &&
+    typeof item.note === 'string' &&
+    typeof item.createdAt === 'string' &&
+    !Number.isNaN(Date.parse(item.createdAt))
+  )
+}
 
-export function loadEntries(): Entry[] {
+export function loadEntries(): EntriesLoadResult {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as Entry[]
-    return Array.isArray(parsed) ? parsed : []
+    const raw = localStorage.getItem(ENTRIES_STORAGE_KEY)
+    if (!raw) return { status: 'ok', entries: [] }
+
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return { status: 'corrupt', entries: [] }
+
+    const entries = parsed.filter(isEntry)
+    // Полностью битый массив (не пустой, но без валидных записей) — не перезаписываем.
+    if (parsed.length > 0 && entries.length === 0) {
+      return { status: 'corrupt', entries: [] }
+    }
+
+    return { status: 'ok', entries }
   } catch {
-    return []
+    return { status: 'corrupt', entries: [] }
   }
 }
 
 export function saveEntries(entries: Entry[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
+  localStorage.setItem(ENTRIES_STORAGE_KEY, JSON.stringify(entries))
 }
 
 export function formatDay(iso: string): string {
